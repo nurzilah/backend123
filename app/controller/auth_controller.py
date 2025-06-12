@@ -1,16 +1,20 @@
 from flask import request, jsonify
-from app import mongo, bcrypt
 from flask_jwt_extended import create_access_token
-import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
+import datetime, random, os, pytz
 from app.model.user import User
-import random
-import smtplib
-from email.mime.text import MIMEText
-import os
+from app.model.login_history import LoginHistory
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
 from google.oauth2 import id_token
-from google.auth.transport import requests
+from google.auth.transport import requests as google_requests
+from dotenv import load_dotenv
 
+load_dotenv()
+
+def get_wib_time():
+    return datetime.datetime.now(pytz.timezone("Asia/Jakarta"))
 
 class AuthController:
     @staticmethod
@@ -23,59 +27,43 @@ class AuthController:
         if not email or not password or not username:
             return jsonify({'message': 'Username, email, and password are required'}), 400
 
-        # Cek apakah email sudah terdaftar
-        existing_user = User.objects(email=email).first()
-        if existing_user:
+        if User.objects(email=email).first():
             return jsonify({'message': 'User already exists'}), 409
 
-        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
-
-        # Generate OTP 4 angka
+        hashed_password = generate_password_hash(password)
         otp = str(random.randint(1000, 9999))
-        otp_expiry = datetime.datetime.utcnow() + datetime.timedelta(minutes=10)
+        expiry = get_wib_time() + datetime.timedelta(minutes=10)
 
-        # Simpan user
-        user = User(
+        User(
             username=username,
             email=email,
             password=hashed_password,
-            created_at=datetime.datetime.utcnow(),
+            created_at=get_wib_time(),
             otp=otp,
-            otp_expiry=otp_expiry,
+            otp_expiry=expiry,
             verified=False
-        )
-        user.save()
+        ).save()
 
-        # Kirim email OTP
         AuthController.send_otp_email(email, otp)
-
-        return jsonify({'message': 'User registered. Please check your email for the OTP code.'}), 201
+        return jsonify({'message': 'User registered. Check email for OTP.'}), 201
 
     @staticmethod
     def verify_otp():
         data = request.get_json()
         email = data.get('email')
         otp = data.get('otp')
-
         user = User.objects(email=email).first()
 
         if not user:
             return jsonify({'message': 'User not found'}), 404
-
         if user.verified:
             return jsonify({'message': 'User already verified'}), 400
-
         if user.otp != otp:
             return jsonify({'message': 'Invalid OTP'}), 400
-
-        if datetime.datetime.utcnow() > user.otp_expiry:
+        if get_wib_time() > user.otp_expiry:
             return jsonify({'message': 'OTP expired'}), 400
 
-        user.verified = True
-        user.otp = None
-        user.otp_expiry = None
-        user.save()
-
+        user.update(verified=True, otp=None, otp_expiry=None)
         return jsonify({'message': 'Account verified successfully'}), 200
 
     @staticmethod
@@ -83,178 +71,100 @@ class AuthController:
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
-
-        if not email or not password:
-            return jsonify({'message': 'Email and password are required'}), 400
+        device = data.get("device") or request.headers.get('User-Agent', 'Unknown Device')
 
         user = User.objects(email=email).first()
+
         if not user:
             return jsonify({'message': 'Invalid email or password'}), 401
-
         if not user.verified:
-            return jsonify({'message': 'Account not verified. Please verify OTP first.'}), 403
+            return jsonify({'message': 'Account not verified'}), 403
 
-        if not bcrypt.check_password_hash(user.password, password):
+        # ⛔️ Penting: cek jika password kosong
+        if not user.password or user.password.strip() == "":
+            return jsonify({'message': 'Akun ini tidak memiliki password. Silakan login dengan Google'}), 403
+
+        if not check_password_hash(user.password, password):
             return jsonify({'message': 'Invalid email or password'}), 401
 
-        expires = datetime.timedelta(hours=1)
-        access_token = create_access_token(identity=str(user.id), expires_delta=expires)
-
-        user_data = {
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'created_at': user.created_at.strftime('%Y-%m-%d %H:%M:%S')
-        }
+        now = get_wib_time()
+        token = create_access_token(identity=str(user.id), expires_delta=datetime.timedelta(hours=1))
+        user.update(updated_at=now)
+        LoginHistory(user_id=str(user.id), device=device, login_time=now).save()
 
         return jsonify({
-            'access_token': access_token,
-            'data': user_data,
+            'access_token': token,
+            'data': {
+                'id': str(user.id),
+                'username': user.username,
+                'email': user.email
+            },
             'message': 'Login successful'
         }), 200
 
     @staticmethod
-    def send_otp_email(to_email, otp):
-        subject = "TheraPalsy Email Verification Code"
-        from_email = os.getenv("MAIL_USERNAME")
-
-        # Buat objek email multipart
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"TheraPalsy <{from_email}>"
-        msg["To"] = to_email
-        msg["Reply-To"] = from_email
-
-        # Format isi email dalam plain text dan HTML
-        text = f"Your OTP code is: {otp}\nThis code will expire in 10 minutes.\nDo not share this code with anyone."
-
-        html = f"""
-        <html>
-        <body>
-            <p><strong>TheraPalsy Email Verification</strong></p>
-            <p>Your OTP code is: <strong>{otp}</strong></p>
-            <p>This code will expire in 10 minutes.<br>
-            Do not share this code with anyone.</p>
-        </body>
-        </html>
-        """
-
-        # Tambahkan isi ke dalam email
-        part1 = MIMEText(text, "plain")
-        part2 = MIMEText(html, "html")
-        msg.attach(part1)
-        msg.attach(part2)
-
-        # Kirim email
-        with smtplib.SMTP(os.getenv("MAIL_SERVER"), int(os.getenv("MAIL_PORT"))) as server:
-            server.starttls()
-            server.login(from_email, os.getenv("MAIL_PASSWORD"))
-            server.send_message(msg)
-            
-            
-    @staticmethod
     def google_login():
         data = request.get_json()
         token = data.get("token")
+        device = data.get("device") or request.headers.get('User-Agent', 'Unknown Device')
+
+        if not token:
+            return jsonify({"message": "Token tidak ditemukan"}), 400
 
         try:
-            # Verifikasi token dengan Google
-            idinfo = id_token.verify_oauth2_token(token, requests.Request(), os.getenv("GOOGLE_CLIENT_ID"))
-            email = idinfo["email"]
-            username = idinfo.get("name", email.split('@')[0])
+            client_id = os.getenv("GOOGLE_CLIENT_ID")
+            info = id_token.verify_oauth2_token(token, google_requests.Request(), client_id)
+            email = info["email"]
+            username = info.get("name", email.split("@")[0])
 
-            # Cari user
             user = User.objects(email=email).first()
-
             if not user:
                 user = User(
                     username=username,
                     email=email,
-                    password="",  # Kosongkan karena pakai Google
-                    created_at=datetime.datetime.utcnow(),
+                    password="",
+                    created_at=get_wib_time(),
                     verified=True
-                )
-                user.save()
+                ).save()
 
+            now = get_wib_time()
             access_token = create_access_token(identity=str(user.id), expires_delta=datetime.timedelta(hours=1))
+            user.update(updated_at=now)
+            LoginHistory(user_id=str(user.id), device=device, login_time=now).save()
 
             return jsonify({
                 "access_token": access_token,
                 "data": {
-                    "id": user.id,
+                    "id": str(user.id),
                     "username": user.username,
                     "email": user.email
                 },
-                "message": "Login via Google successful"
+                "message": "Login via Google berhasil"
             }), 200
 
         except ValueError:
-            return jsonify({"message": "Invalid token"}), 400
-        
-    @staticmethod
-    def forgot_password():
-        data = request.get_json()
-        email = data.get('email')
-
-        user = User.objects(email=email).first()
-        if not user:
-            return jsonify({'message': 'Email not found'}), 404
-
-        # Buat OTP baru dan expiry
-        otp = str(random.randint(1000, 9999))
-        otp_expiry = datetime.datetime.utcnow() + datetime.timedelta(minutes=10)
-
-        user.otp = otp
-        user.otp_expiry = otp_expiry
-        user.save()
-
-        AuthController.send_otp_email(email, otp)
-
-        return jsonify({'message': 'OTP has been sent to your email.'}), 200
-    
-    @staticmethod
-    def reset_password():
-        data = request.get_json()
-        email = data.get('email')
-        otp = data.get('otp')
-        new_password = data.get('new_password')
-
-        user = User.objects(email=email).first()
-        if not user:
-            return jsonify({'message': 'User not found'}), 404
-
-        if user.otp != otp:
-            return jsonify({'message': 'Invalid OTP'}), 400
-
-        if datetime.datetime.utcnow() > user.otp_expiry:
-            return jsonify({'message': 'OTP expired'}), 400
-
-        # Update password
-        hashed_password = bcrypt.generate_password_hash(new_password).decode('utf-8')
-        user.password = hashed_password
-        user.otp = None
-        user.otp_expiry = None
-        user.save()
-
-        return jsonify({'message': 'Password has been reset successfully'}), 200
+            return jsonify({"message": "Token tidak valid"}), 400
 
     @staticmethod
-    def verify_reset_otp():
-        data = request.get_json()
-        email = data.get('email')
-        otp = data.get('otp')
+    def send_otp_email(to_email, otp):
+        from_email = os.getenv("MAIL_USERNAME")
+        subject = "TheraPalsy Email Verification Code"
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"TheraPalsy <{from_email}>"
+        msg["To"] = to_email
 
-        user = User.objects(email=email).first()
-        if not user:
-            return jsonify({'message': 'User not found'}), 404
+        text = f"Your OTP code is: {otp}\nThis code will expire in 10 minutes."
+        html = f"""
+        <html><body>
+        <p><strong>TheraPalsy Verification</strong></p>
+        <p>Your OTP code is: <strong>{otp}</strong></p>
+        </body></html>"""
 
-        if user.otp != otp:
-            return jsonify({'message': 'Invalid OTP'}), 400
+        msg.attach(MIMEText(text, "plain"))
+        msg.attach(MIMEText(html, "html"))
 
-        if datetime.datetime.utcnow() > user.otp_expiry:
-            return jsonify({'message': 'OTP expired'}), 400
-
-        return jsonify({'message': 'OTP verified. Proceed to reset password.'}), 200
-
-
-
+        with smtplib.SMTP(os.getenv("MAIL_SERVER"), int(os.getenv("MAIL_PORT"))) as server:
+            server.starttls()
+            server.login(from_email, os.getenv("MAIL_PASSWORD"))
+            server.send_message(msg)
