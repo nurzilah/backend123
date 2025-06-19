@@ -17,12 +17,16 @@ def get_profile():
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
 
+    # Gunakan default jika belum ada profile image
+    image_path = user.profile_image if user.profile_image else "/static/uploads/pp.png"
+
     return jsonify({
         "username": user.username,
         "email": user.email,
-        "profileImage": user.profile_image or "",
+        "profileImage": image_path,
         "last_login": user.updated_at.strftime("%b %d, %Y, %I:%M %p") if user.updated_at else ""
     }), 200
+
 
 @users.route('/update', methods=['PATCH'])
 @jwt_required()

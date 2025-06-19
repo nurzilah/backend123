@@ -1,14 +1,14 @@
 from flask import request, jsonify
 from flask_jwt_extended import create_access_token
 from werkzeug.security import generate_password_hash, check_password_hash
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 import datetime, random, os, pytz
 from app.model.user import User
 from app.model.login_history import LoginHistory
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import smtplib
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -54,13 +54,10 @@ class AuthController:
         otp = data.get('otp')
         user = User.objects(email=email).first()
 
-        if not user:
-            return jsonify({'message': 'User not found'}), 404
-        if user.verified:
-            return jsonify({'message': 'User already verified'}), 400
-        if user.otp != otp:
-            return jsonify({'message': 'Invalid OTP'}), 400
-        if get_wib_time() > user.otp_expiry:
+        if not user or user.verified or user.otp != otp:
+            return jsonify({'message': 'Invalid OTP or user'}), 400
+
+        if get_wib_time() > user.otp_expiry.replace(tzinfo=pytz.utc):
             return jsonify({'message': 'OTP expired'}), 400
 
         user.update(verified=True, otp=None, otp_expiry=None)
@@ -71,26 +68,16 @@ class AuthController:
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
-        device = data.get("device") or request.headers.get('User-Agent', 'Unknown Device')
+        device = data.get('device') or request.headers.get('User-Agent', 'Unknown')
 
         user = User.objects(email=email).first()
 
-        if not user:
-            return jsonify({'message': 'Invalid email or password'}), 401
-        if not user.verified:
-            return jsonify({'message': 'Account not verified'}), 403
+        if not user or not user.verified or not check_password_hash(user.password, password):
+            return jsonify({'message': 'Invalid email/password or not verified'}), 401
 
-        # ⛔️ Penting: cek jika password kosong
-        if not user.password or user.password.strip() == "":
-            return jsonify({'message': 'Akun ini tidak memiliki password. Silakan login dengan Google'}), 403
-
-        if not check_password_hash(user.password, password):
-            return jsonify({'message': 'Invalid email or password'}), 401
-
-        now = get_wib_time()
         token = create_access_token(identity=str(user.id), expires_delta=datetime.timedelta(hours=1))
-        user.update(updated_at=now)
-        LoginHistory(user_id=str(user.id), device=device, login_time=now).save()
+        user.update(updated_at=get_wib_time())
+        LoginHistory(user_id=str(user.id), device=device, login_time=get_wib_time()).save()
 
         return jsonify({
             'access_token': token,
@@ -98,73 +85,111 @@ class AuthController:
                 'id': str(user.id),
                 'username': user.username,
                 'email': user.email
-            },
-            'message': 'Login successful'
+            }
         }), 200
 
     @staticmethod
+    def forgot_password():
+        data = request.get_json()
+        email = data.get("email")
+        user = User.objects(email=email).first()
+
+        if not user:
+            return jsonify({"message": "Email not registered"}), 404
+
+        otp = str(random.randint(1000, 9999))
+        user.update(otp=otp, otp_expiry=get_wib_time() + datetime.timedelta(minutes=10))
+        AuthController.send_otp_email(email, otp)
+
+        return jsonify({"message": "OTP sent to email"}), 200
+
+    @staticmethod
+    def verify_reset_otp():
+        data = request.get_json()
+        email = data.get("email")
+        otp = data.get("otp")
+        user = User.objects(email=email).first()
+
+        if not user or user.otp != otp:
+            return jsonify({"message": "Invalid OTP"}), 400
+
+        if get_wib_time() > user.otp_expiry.replace(tzinfo=pytz.utc):
+            return jsonify({"message": "OTP expired"}), 400
+
+        return jsonify({"message": "OTP valid"}), 200
+
+    @staticmethod
+    def reset_password():
+        data = request.get_json()
+        email = data.get("email")
+        new_password = data.get("password")
+        user = User.objects(email=email).first()
+
+        if not user:
+            return jsonify({"message": "User not found"}), 404
+
+        user.update(
+            password=generate_password_hash(new_password),
+            otp=None,
+            otp_expiry=None,
+            updated_at=get_wib_time()
+        )
+
+        return jsonify({"message": "Password reset successful"}), 200
+
+    @staticmethod
     def google_login():
+        from flask import request, jsonify
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+        import os
+
         data = request.get_json()
         token = data.get("token")
-        device = data.get("device") or request.headers.get('User-Agent', 'Unknown Device')
+        device = data.get("device") or request.headers.get("User-Agent", "Unknown")
 
-        if not token:
-            return jsonify({"message": "Token tidak ditemukan"}), 400
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        print(f"[DEBUG] Token (start): {token[:30]}...")
+        print(f"[DEBUG] Client ID: {client_id}")
 
         try:
-            client_id = os.getenv("GOOGLE_CLIENT_ID")
+            # 👇 Log ini akan memberitahu detail error
             info = id_token.verify_oauth2_token(token, google_requests.Request(), client_id)
-            email = info["email"]
-            username = info.get("name", email.split("@")[0])
+            print(f"[DEBUG] Google token info: {info}")
 
-            user = User.objects(email=email).first()
-            if not user:
-                user = User(
-                    username=username,
-                    email=email,
-                    password="",
-                    created_at=get_wib_time(),
-                    verified=True
-                ).save()
+            email = info.get("email")
+            print(f"[DEBUG] Email from token: {email}")
+            return jsonify({"message": "Login berhasil"}), 200
 
-            now = get_wib_time()
-            access_token = create_access_token(identity=str(user.id), expires_delta=datetime.timedelta(hours=1))
-            user.update(updated_at=now)
-            LoginHistory(user_id=str(user.id), device=device, login_time=now).save()
+        except ValueError as e:
+            print(f"[ERROR] Token tidak valid: {e}")
+            return jsonify({"message": "Token tidak valid", "detail": str(e)}), 400
 
-            return jsonify({
-                "access_token": access_token,
-                "data": {
-                    "id": str(user.id),
-                    "username": user.username,
-                    "email": user.email
-                },
-                "message": "Login via Google berhasil"
-            }), 200
+        except Exception as ex:
+            print(f"[FATAL ERROR] {ex}")
+            return jsonify({"message": "Server error", "detail": str(ex)}), 500
 
-        except ValueError:
-            return jsonify({"message": "Token tidak valid"}), 400
 
     @staticmethod
     def send_otp_email(to_email, otp):
         from_email = os.getenv("MAIL_USERNAME")
-        subject = "TheraPalsy Email Verification Code"
+        password = os.getenv("MAIL_PASSWORD")
+        subject = "TheraPalsy OTP"
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = f"TheraPalsy <{from_email}>"
         msg["To"] = to_email
 
-        text = f"Your OTP code is: {otp}\nThis code will expire in 10 minutes."
-        html = f"""
-        <html><body>
-        <p><strong>TheraPalsy Verification</strong></p>
-        <p>Your OTP code is: <strong>{otp}</strong></p>
-        </body></html>"""
+        text = f"Your OTP code is: {otp}"
+        html = f"<html><body><p><strong>Your OTP code is: {otp}</strong></p></body></html>"
 
         msg.attach(MIMEText(text, "plain"))
         msg.attach(MIMEText(html, "html"))
 
-        with smtplib.SMTP(os.getenv("MAIL_SERVER"), int(os.getenv("MAIL_PORT"))) as server:
-            server.starttls()
-            server.login(from_email, os.getenv("MAIL_PASSWORD"))
-            server.send_message(msg)
+        try:
+            with smtplib.SMTP(os.getenv("MAIL_SERVER"), int(os.getenv("MAIL_PORT"))) as server:
+                server.starttls()
+                server.login(from_email, password)
+                server.send_message(msg)
+        except Exception as e:
+            print(f"Gagal kirim email: {e}")
