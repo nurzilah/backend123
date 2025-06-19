@@ -11,4 +11,6 @@ google-auth-httplib2
 requests
 beautifulsoup4
 gunicorn
+pytz
+
 
