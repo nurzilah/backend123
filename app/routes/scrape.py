@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 from app.model.article import Article
 from datetime import datetime
 
-scrape_bp = Blueprint('scrape', __name__)
+scrape_bp = Blueprint('scrape_bp', __name__)
 
 @scrape_bp.route('/scrape_bells_palsy', methods=['POST'])
 def scrape_bells_palsy():
