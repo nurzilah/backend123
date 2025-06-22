@@ -10,20 +10,18 @@ import base64
 
 detection_api = Blueprint('detection_api', __name__)
 
-# Global variables untuk model dan MediaPipe
+# Global variables
 model = None
 scaler = None
 mp_face_mesh = None
 face_mesh = None
 lock = threading.Lock()
 
-# Kolom fitur sesuai dengan training
 FEATURE_COLUMNS = ['eyebrow_dist', 'eye_asymmetry', 'mar', 'mouth_asymmetry', 'pucker_asymmetry']
 
 def load_model():
-    """Load model dan scaler saat blueprint diimport"""
+    """Load model and scaler on import"""
     global model, scaler, mp_face_mesh, face_mesh
-
     try:
         model_path = os.path.join('app', 'ml', 'model_mlp.pkl')
         scaler_path = os.path.join('app', 'ml', 'scaler.pkl')
@@ -42,28 +40,22 @@ def load_model():
         )
 
         print("✅ Bell's Palsy detection model loaded successfully!")
-        return True
     except Exception as e:
-        print(f"❌ Error loading Bell's Palsy model: {e}")
-        return False
+        print(f"❌ Error loading model: {e}")
 
 def euclidean(p1, p2):
     return np.linalg.norm(np.array(p1) - np.array(p2))
 
 def decode_base64_image(image_data):
-    """Decode base64 string ke image OpenCV"""
     try:
         if ',' in image_data:
             image_data = image_data.split(',')[1]
-        # Tambahkan padding jika kurang
         missing_padding = len(image_data) % 4
         if missing_padding:
             image_data += '=' * (4 - missing_padding)
-
         image_bytes = base64.b64decode(image_data)
         nparr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
         if image is None:
             raise ValueError("Decoding to OpenCV image failed")
         return image
@@ -101,20 +93,17 @@ def extract_features_from_landmarks(landmarks):
         mar = euclidean(top_lip, bottom_lip) / (euclidean(left_mouth, right_mouth) + 1e-8)
 
         mouth_asymmetry = abs(left_mouth[1] - right_mouth[1])
-
         left_pucker = get_point(78)
         right_pucker = get_point(308)
         pucker_asymmetry = abs(left_pucker[0] - right_pucker[0])
 
-        features = {
+        return pd.DataFrame([{
             'eyebrow_dist': eyebrow_dist,
             'eye_asymmetry': eye_asymmetry,
             'mar': mar,
             'mouth_asymmetry': mouth_asymmetry,
             'pucker_asymmetry': pucker_asymmetry
-        }
-
-        return pd.DataFrame([features], columns=FEATURE_COLUMNS)
+        }], columns=FEATURE_COLUMNS)
     except Exception as e:
         print(f"❌ Error extracting features: {e}")
         return None
@@ -122,18 +111,16 @@ def extract_features_from_landmarks(landmarks):
 @detection_api.route('/predict_bellspalsy', methods=['POST'])
 def predict_bellspalsy():
     global model, scaler, face_mesh
-
     if not all([model, scaler, face_mesh]):
         return jsonify({'success': False, 'error': 'Model not loaded'}), 503
 
     try:
         data = request.json
         frames = data.get('frames', [])
-
         if not frames:
             return jsonify({'success': False, 'error': 'No frames provided'}), 400
 
-        print(f"📸 Processing {len(frames)} frames for Bell's Palsy detection")
+        print(f"📸 Processing {len(frames)} frames...")
 
         with lock:
             features_list = []
@@ -165,7 +152,7 @@ def predict_bellspalsy():
             is_positive = avg_prob >= 0.5
             confidence_level = "Tinggi" if avg_prob > 0.7 or avg_prob < 0.3 else "Sedang"
 
-            result = {
+            return jsonify({
                 'success': True,
                 'is_positive': is_positive,
                 'prediction': "Bell's Palsy" if is_positive else "Normal",
@@ -179,10 +166,7 @@ def predict_bellspalsy():
                     'normal': float(1 - avg_prob),
                     'bells_palsy': avg_prob
                 }
-            }
-
-            print(f"🎯 Prediction: {result['prediction']} with {result['percentage']}% confidence")
-            return jsonify(result)
+            })
 
     except Exception as e:
         print(f"❌ Error in prediction: {e}")
@@ -198,5 +182,5 @@ def detection_health():
         'mediapipe_initialized': face_mesh is not None
     })
 
-# Jalankan saat import
+# Load model on import
 load_model()
