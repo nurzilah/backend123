@@ -8,6 +8,8 @@ from app.routes.chart_routes import chart
 from dotenv import load_dotenv
 from flask_pymongo import PyMongo
 from app.routes.scrape import scrape_bp
+from app.api.detection_api import detection_api
+
 import os
 
 env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -28,6 +30,7 @@ app.register_blueprint(users, url_prefix='/api/user')
 app.register_blueprint(api, url_prefix='/api')
 app.register_blueprint(chart, url_prefix="/api/chart")
 app.register_blueprint(scrape_bp, url_prefix='/api/scrape')
+app.register_blueprint(detection_api, url_prefix='/api/detection')
 
 @app.route('/')
 def index():
