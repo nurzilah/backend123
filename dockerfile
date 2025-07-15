@@ -1,27 +1,23 @@
+# Gunakan base image Python resmi yang sudah lengkap
 FROM python:3.10-slim
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    build-essential \
-    python3-dev \
-    python3-distutils \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# Install distutils, gcc, dan pip dependencies agar numpy dan lainnya sukses
+RUN apt-get update && \
+    apt-get install -y python3-distutils python3-dev gcc build-essential && \
+    apt-get clean
 
-# Set work directory
+# Set working directory
 WORKDIR /app
 
-# Copy project files
+# Copy semua file ke dalam container
 COPY . .
 
-# Upgrade pip and install Python dependencies
-RUN pip install --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
 
-# Expose the default port for Railway
+# Expose port (Railway default = 8080)
 EXPOSE 8080
 
-# Start the app with Gunicorn
+# Jalankan aplikasi dengan gunicorn
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "server:app"]
