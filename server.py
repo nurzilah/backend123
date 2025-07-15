@@ -12,6 +12,7 @@ from app.api.api import api
 from app.routes.chart_routes import chart
 from app.routes.scrape import scrape_bp
 from app.api.detection_api import detection_api
+from app.api.video_api import video_api
 
 # Load environment variables
 env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -35,6 +36,10 @@ app.register_blueprint(api, url_prefix='/api')
 app.register_blueprint(chart, url_prefix='/api/chart')
 app.register_blueprint(scrape_bp, url_prefix='/api/scrape')
 app.register_blueprint(detection_api, url_prefix='/api/detection')
+app.register_blueprint(video_api, url_prefix='/api/video')
+
+
+
 
 @app.route('/')
 def index():

@@ -1,8 +1,11 @@
 from flask import Blueprint, request, jsonify
 import threading, os, cv2, mediapipe as mp
 import numpy as np, pandas as pd, pickle, base64
+from datetime import datetime
+import json
+from app.model.detection_result import DetectionResult  
 
-detection_api = Blueprint('detection_api', __name__)  # ✅ Nama unik
+detection_api = Blueprint('detection_api', __name__)  
 
 model = scaler = mp_face_mesh = face_mesh = None
 lock = threading.Lock()
@@ -105,6 +108,80 @@ def predict_bellspalsy():
         }
     })
 
+@detection_api.route('/save', methods=['POST'])
+def save_detection_result():
+    """Endpoint untuk menyimpan hasil deteksi ke MongoDB"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+
+        # ✅ VALIDASI: Pastikan field wajib ada
+        user_id = data.get('user_id')
+        confidence = data.get('confidence', 0.0)
+
+        if not user_id:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required field: user_id'
+            }), 400
+
+        # ✅ VALIDASI: Jangan simpan kalau confidence kosong atau 0
+        if confidence is None or float(confidence) == 0.0:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid detection result (confidence = 0, not saving)'
+            }), 400
+
+        # Siapkan data untuk disimpan
+        input_data = []
+        if 'frames' in data:
+            input_data.append({
+                'type': 'frames',
+                'count': len(data['frames']),
+                'timestamp': datetime.now().isoformat()
+            })
+
+        result_data = {
+            'prediction': data.get('prediction', ''),
+            'is_positive': data.get('is_positive', False),
+            'confidence': confidence,
+            'confidence_level': data.get('confidence_level', ''),
+            'percentage': data.get('percentage', 0.0),
+            'total_frames': data.get('total_frames', 0),
+            'bellspalsy_frames': data.get('bellspalsy_frames', 0),
+            'normal_frames': data.get('normal_frames', 0),
+            'probabilities': data.get('probabilities', {}),
+            'additional_notes': data.get('notes', ''),
+            'processed_at': datetime.now().isoformat()
+        }
+
+        # ✅ SIMPAN hanya jika confidence valid
+        detection_result = DetectionResult(
+            user_id=user_id,
+            input_data=input_data,
+            result=result_data
+        )
+
+        detection_result.save()
+
+        return jsonify({
+            'success': True,
+            'message': 'Detection result saved successfully to MongoDB',
+            'document_id': str(detection_result.id),
+            'user_id': detection_result.user_id,
+            'detected_at': detection_result.detected_at.isoformat(),
+            'collection': 'deteksi_history'
+        })
+
+    except Exception as e:
+        print(f"❌ Error saving detection result to MongoDB: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to save to database: {str(e)}'
+        }), 500
+
+
 @detection_api.route('/detection_health', methods=['GET'])
 def detection_health():
     return jsonify({
@@ -113,5 +190,156 @@ def detection_health():
         'scaler_loaded': scaler is not None,
         'mediapipe_initialized': face_mesh is not None
     })
+
+# Endpoint untuk melihat history hasil deteksi dari MongoDB
+@detection_api.route('/results', methods=['GET'])
+def get_detection_results():
+    """Endpoint untuk mengambil history hasil deteksi dari MongoDB"""
+    try:
+        # Parameter query untuk filtering
+        user_id = request.args.get('user_id')
+        limit = int(request.args.get('limit', 50))  # Default 50 records
+        page = int(request.args.get('page', 1))     # Default page 1
+        
+        # Build query
+        query = {}
+        if user_id:
+            query['user_id'] = user_id
+        
+        # Hitung offset untuk pagination
+        offset = (page - 1) * limit
+        
+        # Query ke MongoDB
+        detection_results = DetectionResult.objects(**query).order_by('-detected_at').skip(offset).limit(limit)
+        total_count = DetectionResult.objects(**query).count()
+        
+        # Convert ke dictionary
+        results = []
+        for detection in detection_results:
+            result_dict = detection.to_dict()
+            result_dict['id'] = str(detection.id)
+            
+            # Parse JSON result jika memungkinkan
+            try:
+                if detection.result:
+                    parsed_result = json.loads(detection.result)
+                    result_dict['parsed_result'] = parsed_result
+            except json.JSONDecodeError:
+                result_dict['parsed_result'] = None
+            
+            results.append(result_dict)
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'count': len(results),
+            'total_count': total_count,
+            'page': page,
+            'limit': limit,
+            'total_pages': (total_count + limit - 1) // limit,
+            'has_next': offset + limit < total_count,
+            'has_prev': page > 1
+        })
+        
+    except Exception as e:
+        print(f"❌ Error getting detection results from MongoDB: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get results from database: {str(e)}'
+        }), 500
+
+# Endpoint untuk mendapatkan detail satu hasil deteksi
+@detection_api.route('/results/<result_id>', methods=['GET'])
+def get_detection_result_detail(result_id):
+    """Endpoint untuk mengambil detail satu hasil deteksi berdasarkan ID"""
+    try:
+        detection_result = DetectionResult.objects(id=result_id).first()
+        
+        if not detection_result:
+            return jsonify({
+                'success': False,
+                'error': 'Detection result not found'
+            }), 404
+        
+        result_dict = detection_result.to_dict()
+        result_dict['id'] = str(detection_result.id)
+        
+        # Parse JSON result
+        try:
+            if detection_result.result:
+                parsed_result = json.loads(detection_result.result)
+                result_dict['parsed_result'] = parsed_result
+        except json.JSONDecodeError:
+            result_dict['parsed_result'] = None
+        
+        return jsonify({
+            'success': True,
+            'result': result_dict
+        })
+        
+    except Exception as e:
+        print(f"❌ Error getting detection result detail: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get result detail: {str(e)}'
+        }), 500
+
+# Endpoint untuk menghapus hasil deteksi
+@detection_api.route('/results/<result_id>', methods=['DELETE'])
+def delete_detection_result(result_id):
+    """Endpoint untuk menghapus hasil deteksi berdasarkan ID"""
+    try:
+        detection_result = DetectionResult.objects(id=result_id).first()
+        
+        if not detection_result:
+            return jsonify({
+                'success': False,
+                'error': 'Detection result not found'
+            }), 404
+        
+        detection_result.delete()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Detection result deleted successfully',
+            'deleted_id': result_id
+        })
+        
+    except Exception as e:
+        print(f"❌ Error deleting detection result: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to delete result: {str(e)}'
+        }), 500
+    
+@detection_api.route('/history/last/<user_id>', methods=['GET'])
+def get_latest_detection_result(user_id):
+    try:
+        result = DetectionResult.objects(user_id=user_id).order_by('-detected_at').first()
+        if result:
+            result_dict = result.to_dict()
+            result_dict['id'] = str(result.id)
+
+            try:
+                if result.result:
+                    parsed_result = json.loads(result.result)
+                    result_dict['parsed_result'] = parsed_result
+            except json.JSONDecodeError:
+                result_dict['parsed_result'] = None
+
+            return jsonify({
+                'success': True,
+                'result': result_dict
+            }), 200
+
+        return jsonify({'success': True, 'result': None}), 200
+
+    except Exception as e:
+        print(f"❌ Error getting latest detection result: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get latest result: {str(e)}'
+        }), 500
+
 
 load_model()

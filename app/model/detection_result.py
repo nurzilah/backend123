@@ -1,11 +1,11 @@
-from mongoengine import Document, StringField, DateTimeField, ListField
+from mongoengine import Document, StringField, DateTimeField, ListField, DictField
 from datetime import datetime
 import pytz
 
 class DetectionResult(Document):
     user_id = StringField(required=True)
     input_data = ListField()
-    result = StringField()
+    result = DictField(required=True)
     detected_at = DateTimeField(default=lambda: datetime.now(pytz.timezone("Asia/Jakarta")))
 
     meta = {
