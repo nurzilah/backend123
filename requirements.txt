@@ -14,7 +14,7 @@ beautifulsoup4
 gunicorn
 pytz
 authlib
-opencv-python
+opencv-python-headless
 mediapipe
 numpy
 pandas
