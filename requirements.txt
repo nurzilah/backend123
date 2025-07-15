@@ -14,9 +14,9 @@ beautifulsoup4
 gunicorn
 pytz
 authlib
-opencv-python-headless
+numpy==1.24.4
+opencv-python-headless==4.7.0.72
 mediapipe
-numpy
 pandas
 scikit-learn
 pillow
